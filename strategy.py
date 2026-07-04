@@ -1,87 +1,137 @@
-from config import settings
-from logger import log
-from strategy import Signal
-from trade_manager import Trade
+from dataclasses import dataclass
+from typing import Literal, Optional
+import pandas as pd
+
+Side = Literal["buy", "sell"]
 
 
-def calculate_amount(client, symbol: str, signal: Signal) -> float:
+@dataclass
+class Signal:
+    side: Side
+    timeframe: str
+    entry: float
+    stop_loss: float
+    take_profit: float
+    break_even_price: float
+    risk_per_unit: float
+    candle3_time: int
+
+
+def candle_body_high(row) -> float:
+    return max(float(row["open"]), float(row["close"]))
+
+
+def candle_body_low(row) -> float:
+    return min(float(row["open"]), float(row["close"]))
+
+
+def detect_dls_signal(
+    df: pd.DataFrame,
+    timeframe: str,
+    risk_reward: float = 3.0,
+    break_even_r: float = 0.82,
+) -> Optional[Signal]:
     """
-    Risk-based position sizing.
+    DLS strategy using ONLY your rules.
 
-    Important for MEXC futures:
-    BTC/USDT:USDT orders are usually sized in whole contracts, not decimal BTC.
-    So we calculate the BTC/base amount first, then convert it into contracts
-    using the market contractSize from ccxt.
+    BUY setup:
+    1. Candle 1 can be any candle.
+    2. Candle 2 must take/sweep Candle 1 high.
+    3. Candle 2 must close below Candle 1 high.
+    4. Candle 3 must take/sweep Candle 1 low.
+    5. Candle 3 must close above Candle 2 body.
+       - Candle 3 does NOT need to close inside Candle 1 range.
+       - It is valid even if Candle 3 closes outside the DLS range,
+         as long as it closes above Candle 2 body.
+
+    SELL setup:
+    1. Candle 1 can be any candle.
+    2. Candle 2 must take/sweep Candle 1 low.
+    3. Candle 2 must close above Candle 1 low.
+    4. Candle 3 must take/sweep Candle 1 high.
+    5. Candle 3 must close below Candle 2 body.
+       - Candle 3 does NOT need to close inside Candle 1 range.
+       - It is valid even if Candle 3 closes outside the DLS range,
+         as long as it closes below Candle 2 body.
+
+    The function only checks the last 3 CLOSED candles.
     """
-    balance = client.balance_usdt()
-    risk_usdt = balance * (settings.risk_percent / 100.0)
+    if len(df) < 3:
+        return None
 
-    if signal.risk_per_unit <= 0:
-        raise ValueError("Invalid signal risk distance")
+    c1 = df.iloc[-3]
+    c2 = df.iloc[-2]
+    c3 = df.iloc[-1]
 
-    # Base asset amount, for example BTC amount.
-    base_amount = risk_usdt / signal.risk_per_unit
+    c1_high = float(c1["high"])
+    c1_low = float(c1["low"])
 
-    market = client.exchange.market(symbol)
-    contract_size = market.get("contractSize") or 1
+    c2_high = float(c2["high"])
+    c2_low = float(c2["low"])
+    c2_close = float(c2["close"])
 
-    # For swaps/futures, ccxt amount is normally number of contracts.
-    if market.get("contract", False):
-        raw_contracts = base_amount / float(contract_size)
+    c3_high = float(c3["high"])
+    c3_low = float(c3["low"])
+    c3_close = float(c3["close"])
 
-        # MEXC requires whole contracts. Use floor so risk does not exceed the target too much.
-        contracts = int(raw_contracts)
+    c2_body_top = candle_body_high(c2)
+    c2_body_bottom = candle_body_low(c2)
 
-        if contracts < 1:
-            contracts = 1
-            log.warning(
-                "Calculated size is below MEXC minimum. Using minimum 1 contract. "
-                "This may risk more than your configured risk percent on small balances."
-            )
+    entry = c3_close
+    candle3_time = int(c3["timestamp"])
 
-        amount = float(contracts)
-
-        approx_base_amount = amount * float(contract_size)
-        approx_risk = approx_base_amount * signal.risk_per_unit
-
-        log.info(
-            f"Balance={balance:.4f} USDT | Risk%={settings.risk_percent} | "
-            f"RiskUSDT={risk_usdt:.4f} | ContractSize={contract_size} | "
-            f"Amount={amount} contracts | ApproxRisk={approx_risk:.4f} USDT"
-        )
-        return amount
-
-    # Spot-style fallback. The bot is intended for futures, but this avoids crashing
-    # if the market is not marked as a contract by the exchange metadata.
-    amount = float(client.amount_to_precision(symbol, base_amount))
-
-    if amount <= 0:
-        raise ValueError("Calculated amount is zero. Increase balance/risk or use a larger market.")
-
-    log.info(
-        f"Balance={balance:.4f} USDT | Risk%={settings.risk_percent} | "
-        f"RiskUSDT={risk_usdt:.4f} | Amount={amount}"
+    # BUY DLS:
+    # C2 sweeps C1 high and closes weak below C1 high.
+    # C3 sweeps C1 low and closes above the TOP of C2 body.
+    buy_ok = (
+        c2_high > c1_high and
+        c2_close < c1_high and
+        c3_low < c1_low and
+        c3_close > c2_body_top
     )
-    return amount
 
+    if buy_ok:
+        stop = c3_low
+        risk = entry - stop
+        if risk <= 0:
+            return None
 
-def should_move_to_break_even(trade: Trade, price: float) -> bool:
-    if trade.break_even_moved:
-        return False
-    if trade.side == "buy":
-        return price >= trade.break_even_price
-    return price <= trade.break_even_price
+        return Signal(
+            side="buy",
+            timeframe=timeframe,
+            entry=entry,
+            stop_loss=stop,
+            take_profit=entry + (risk * risk_reward),
+            break_even_price=entry + (risk * break_even_r),
+            risk_per_unit=risk,
+            candle3_time=candle3_time,
+        )
 
+    # SELL DLS:
+    # C2 sweeps C1 low and closes weak above C1 low.
+    # C3 sweeps C1 high and closes below the BOTTOM of C2 body.
+    sell_ok = (
+        c2_low < c1_low and
+        c2_close > c1_low and
+        c3_high > c1_high and
+        c3_close < c2_body_bottom
+    )
 
-def should_stop_or_take_profit(trade: Trade, price: float):
-    if trade.side == "buy":
-        if price <= trade.stop_loss:
-            return "stop_loss"
-        if price >= trade.take_profit:
-            return "take_profit"
-    else:
-        if price >= trade.stop_loss:
-            return "stop_loss"
-        if price <= trade.take_profit:
-            return "take_profit"
+    if sell_ok:
+        stop = c3_high
+        risk = stop - entry
+        if risk <= 0:
+            return None
+
+        return Signal(
+            side="sell",
+            timeframe=timeframe,
+            entry=entry,
+            stop_loss=stop,
+            take_profit=entry - (risk * risk_reward),
+            break_even_price=entry - (risk * break_even_r),
+            risk_per_unit=risk,
+            candle3_time=candle3_time,
+        )
+
     return None
