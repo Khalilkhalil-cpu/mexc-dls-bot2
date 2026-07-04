@@ -14,9 +14,6 @@ class Settings:
     mexc_api_key: str = os.getenv("MEXC_API_KEY", "")
     mexc_secret_key: str = os.getenv("MEXC_SECRET_KEY", "")
 
-    # Use SYMBOLS for multiple cryptos.
-    # Example:
-    # SYMBOLS=BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT
     symbols: tuple = _split_csv(
         os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC/USDT:USDT"))
     )
@@ -26,9 +23,12 @@ class Settings:
     risk_percent: float = float(os.getenv("RISK_PERCENT", "5"))
     risk_reward: float = float(os.getenv("RISK_REWARD", "3"))
     break_even_r: float = float(os.getenv("BREAK_EVEN_R", "0.82"))
-    leverage: int = int(os.getenv("LEVERAGE", "1"))
-    dry_run: bool = os.getenv("DRY_RUN", "true").lower() == "true"
 
+    # MEXC futures settings
+    leverage: int = int(os.getenv("LEVERAGE", "50"))
+    margin_mode: str = os.getenv("MARGIN_MODE", "isolated").lower()
+
+    dry_run: bool = os.getenv("DRY_RUN", "true").lower() == "true"
     check_interval_seconds: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))
 
 
