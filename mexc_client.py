@@ -5,8 +5,11 @@ import pandas as pd
 from config import settings
 from logger import log
 
-
 MEXC_FUTURES_BASE_URL = "https://contract.mexc.com"
+
+
+def _setting(name, default):
+    return getattr(settings, name, default)
 
 
 class MexcClient:
@@ -18,6 +21,12 @@ class MexcClient:
             "options": {"defaultType": "swap"},
         })
 
+        self._last_request_at = 0.0
+        self._price_cache = {}
+        self.request_delay_seconds = float(_setting("request_delay_seconds", 0.7))
+        self.rate_limit_backoff_seconds = float(_setting("rate_limit_backoff_seconds", 90))
+        self.price_cache_seconds = float(_setting("price_cache_seconds", 20))
+
         try:
             self.exchange.load_markets()
             log.info("MEXC markets loaded")
@@ -26,18 +35,31 @@ class MexcClient:
 
         self.configure_futures_settings()
 
-    def configure_futures_settings(self):
-        """
-        Configure MEXC futures settings.
+    def _wait_before_request(self):
+        elapsed = time.time() - self._last_request_at
+        if elapsed < self.request_delay_seconds:
+            time.sleep(self.request_delay_seconds - elapsed)
+        self._last_request_at = time.time()
 
-        MEXC/ccxt requires openType and positionType:
-        openType:
-            1 = isolated
-            2 = cross
-        positionType:
-            1 = long
-            2 = short
-        """
+    def _is_rate_limit_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "requests are too frequent" in text or '"code":510' in text or "code=510" in text
+
+    def _with_retry(self, fn, *args, **kwargs):
+        attempts = int(_setting("request_retry_attempts", 3))
+        for attempt in range(1, attempts + 1):
+            try:
+                self._wait_before_request()
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                if self._is_rate_limit_error(exc) and attempt < attempts:
+                    wait = self.rate_limit_backoff_seconds
+                    log.warning(f"MEXC rate limit hit. Backing off {wait}s then retrying attempt {attempt + 1}/{attempts}")
+                    time.sleep(wait)
+                    continue
+                raise
+
+    def configure_futures_settings(self):
         if settings.dry_run:
             log.info(
                 f"DRY_RUN futures config: margin={settings.margin_mode}, leverage={settings.leverage}x"
@@ -47,9 +69,10 @@ class MexcClient:
         open_type = 1 if settings.margin_mode == "isolated" else 2
 
         for symbol in settings.symbols:
-            for position_type in (1, 2):  # 1 long, 2 short
+            for position_type in (1, 2):
                 try:
-                    self.exchange.set_leverage(
+                    self._with_retry(
+                        self.exchange.set_leverage,
                         settings.leverage,
                         symbol,
                         {
@@ -92,13 +115,15 @@ class MexcClient:
         url = f"{MEXC_FUTURES_BASE_URL}/api/v1/contract/kline/{contract_symbol}"
         params = {"interval": "Min60", "start": start, "end": end}
 
-        response = requests.get(url, params=params, timeout=20)
-        response.raise_for_status()
-        payload = response.json()
+        def request():
+            response = requests.get(url, params=params, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("success", False):
+                raise RuntimeError(f"MEXC kline error for {contract_symbol}: {payload}")
+            return payload
 
-        if not payload.get("success", False):
-            raise RuntimeError(f"MEXC kline error for {contract_symbol}: {payload}")
-
+        payload = self._with_retry(request)
         data = payload.get("data", {})
 
         if isinstance(data, dict):
@@ -168,11 +193,18 @@ class MexcClient:
         raise ValueError("This bot only supports 1h and 2h timeframes.")
 
     def last_price(self, symbol: str) -> float:
-        ticker = self.exchange.fetch_ticker(symbol)
-        return float(ticker["last"])
+        now = time.time()
+        cached = self._price_cache.get(symbol)
+        if cached and now - cached["time"] <= self.price_cache_seconds:
+            return cached["price"]
+
+        ticker = self._with_retry(self.exchange.fetch_ticker, symbol)
+        price = float(ticker["last"])
+        self._price_cache[symbol] = {"price": price, "time": now}
+        return price
 
     def balance_usdt(self) -> float:
-        bal = self.exchange.fetch_balance()
+        bal = self._with_retry(self.exchange.fetch_balance)
         for key in ("USDT", "usdt"):
             if key in bal.get("total", {}):
                 return float(bal["total"][key])
@@ -189,4 +221,4 @@ class MexcClient:
         if settings.dry_run:
             log.info(f"DRY_RUN order: {side.upper()} {amount} {symbol} reduce_only={reduce_only}")
             return {"id": "dry_run", "side": side, "amount": amount, "symbol": symbol}
-        return self.exchange.create_order(symbol, "market", side, amount, None, params)
+        return self._with_retry(self.exchange.create_order, symbol, "market", side, amount, None, params)
