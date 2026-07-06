@@ -1,24 +1,21 @@
 from logger import log
-from strategy import Signal
-from trade_manager import TradeManager, Trade
-from risk_manager import calculate_amount
+from models import Signal, OpenTrade
 
 
 class OrderManager:
-    def __init__(self, client, trade_manager: TradeManager):
+    def __init__(self, client, trades):
         self.client = client
-        self.trade_manager = trade_manager
+        self.trades = trades
 
-    def open_signal(self, symbol: str, signal: Signal):
-        if self.trade_manager.has_trade_for_signal(symbol, signal.timeframe, signal.candle3_time):
-            log.info(f"Signal already traded: {symbol} {signal.timeframe} {signal.candle3_time}")
-            return None
+    def open_signal(self, signal: Signal, amount: float):
+        side = "buy" if signal.side == "buy" else "sell"
+        order = self.client.create_market_order(signal.symbol, side, amount, reduce_only=False)
+        trade = self.trades.add_trade(signal, amount)
+        log.warning("ORDER OPEN %s order=%s", signal.signal_id, order)
+        return trade
 
-        amount = calculate_amount(self.client, symbol, signal)
-        self.client.create_market_order(symbol, signal.side, amount, reduce_only=False)
-        return self.trade_manager.add_trade(symbol, signal, amount)
-
-    def close_trade(self, trade: Trade, reason: str, price: float):
-        close_side = "sell" if trade.side == "buy" else "buy"
-        self.client.create_market_order(trade.symbol, close_side, trade.amount, reduce_only=True)
-        self.trade_manager.close_trade(trade, price, reason)
+    def close_trade(self, trade: OpenTrade, reason: str, price: float):
+        side = "sell" if trade.side == "buy" else "buy"
+        order = self.client.create_market_order(trade.symbol, side, trade.amount, reduce_only=True)
+        self.trades.close_trade(trade, price, reason)
+        log.warning("ORDER CLOSE %s reason=%s order=%s", trade.trade_id, reason, order)
