@@ -1,6 +1,4 @@
-ccxt==4.4.92
-pandas==2.2.3
-numpy==2.2.1
-python-dotenv==1.0.1
-requests==2.32.3
-pytz==2024.2
+ccxt
+pandas
+pydantic-settings
+requests

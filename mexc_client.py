@@ -1,214 +1,74 @@
+from __future__ import annotations
 import time
-import requests
+from typing import Dict, Tuple
 import ccxt
 import pandas as pd
 from config import settings
 from logger import log
 
-MEXC_FUTURES_BASE_URL = "https://contract.mexc.com"
-
-
-def _setting(name, default):
-    return getattr(settings, name, default)
-
-
 class MexcClient:
     def __init__(self):
         self.exchange = ccxt.mexc({
             "apiKey": settings.mexc_api_key,
-            "secret": settings.mexc_secret_key,
+            "secret": settings.mexc_secret,
             "enableRateLimit": True,
             "options": {"defaultType": "swap"},
         })
+        self.exchange.load_markets()
+        self._ohlcv_cache: Dict[Tuple[str, str, int], Tuple[float, pd.DataFrame]] = {}
+        self._price_cache: Dict[str, Tuple[float, float]] = {}
+        log.info("MEXC markets loaded")
 
-        self._last_request_at = 0.0
-        self._price_cache = {}
-        self.request_delay_seconds = float(_setting("request_delay_seconds", 0.7))
-        self.rate_limit_backoff_seconds = float(_setting("rate_limit_backoff_seconds", 90))
-        self.price_cache_seconds = float(_setting("price_cache_seconds", 20))
+    def valid_symbols(self):
+        markets = self.exchange.markets
+        if settings.scan_all_usdt_swaps:
+            syms = [s for s, m in markets.items() if m.get("swap") and m.get("quote") == "USDT" and m.get("active", True)]
+            return tuple(syms[:settings.max_symbols])
+        return tuple(s for s in settings.symbol_list if s in markets)
 
-        try:
-            self.exchange.load_markets()
-            log.info("MEXC markets loaded")
-        except Exception as exc:
-            log.warning(f"Could not load markets from ccxt yet: {exc}")
+    def _sleep_req(self):
+        time.sleep(float(settings.request_delay_seconds))
 
-        self.configure_futures_settings()
-
-    def _wait_before_request(self):
-        elapsed = time.time() - self._last_request_at
-        if elapsed < self.request_delay_seconds:
-            time.sleep(self.request_delay_seconds - elapsed)
-        self._last_request_at = time.time()
-
-    def _is_rate_limit_error(self, exc: Exception) -> bool:
-        text = str(exc).lower()
-        return "requests are too frequent" in text or '"code":510' in text or "code=510" in text
-
-    def _with_retry(self, fn, *args, **kwargs):
-        attempts = int(_setting("request_retry_attempts", 3))
-        for attempt in range(1, attempts + 1):
-            try:
-                self._wait_before_request()
-                return fn(*args, **kwargs)
-            except Exception as exc:
-                if self._is_rate_limit_error(exc) and attempt < attempts:
-                    wait = self.rate_limit_backoff_seconds
-                    log.warning(f"MEXC rate limit hit. Backing off {wait}s then retrying attempt {attempt + 1}/{attempts}")
-                    time.sleep(wait)
-                    continue
-                raise
-
-    def configure_futures_settings(self):
-        if settings.dry_run:
-            log.info(
-                f"DRY_RUN futures config: margin={settings.margin_mode}, leverage={settings.leverage}x"
-            )
-            return
-
-        open_type = 1 if settings.margin_mode == "isolated" else 2
-
-        for symbol in settings.symbols:
-            for position_type in (1, 2):
-                try:
-                    self._with_retry(
-                        self.exchange.set_leverage,
-                        settings.leverage,
-                        symbol,
-                        {
-                            "openType": open_type,
-                            "positionType": position_type,
-                        },
-                    )
-                    side_name = "long" if position_type == 1 else "short"
-                    log.info(
-                        f"Set {symbol} {side_name}: margin={settings.margin_mode}, leverage={settings.leverage}x"
-                    )
-                except Exception as exc:
-                    log.warning(
-                        f"Could not set leverage/margin for {symbol} positionType={position_type}: {exc}"
-                    )
-
-    def _contract_symbol(self, symbol: str) -> str:
-        s = symbol.strip().upper()
-
-        if "/" in s:
-            base = s.split("/")[0]
-            quote_part = s.split("/")[1]
-            quote = quote_part.split(":")[0]
-            return f"{base}_{quote}"
-
-        if "_" in s:
-            return s
-
-        if s.endswith("USDT"):
-            return f"{s[:-4]}_USDT"
-
-        return s
-
-    def _fetch_futures_1h_candles(self, symbol: str, limit: int = 300) -> pd.DataFrame:
-        contract_symbol = self._contract_symbol(symbol)
-
-        end = int(time.time())
-        start = end - (limit + 10) * 60 * 60
-
-        url = f"{MEXC_FUTURES_BASE_URL}/api/v1/contract/kline/{contract_symbol}"
-        params = {"interval": "Min60", "start": start, "end": end}
-
-        def request():
-            response = requests.get(url, params=params, timeout=20)
-            response.raise_for_status()
-            payload = response.json()
-            if not payload.get("success", False):
-                raise RuntimeError(f"MEXC kline error for {contract_symbol}: {payload}")
-            return payload
-
-        payload = self._with_retry(request)
-        data = payload.get("data", {})
-
-        if isinstance(data, dict):
-            times = data.get("time", [])
-            opens = data.get("open", [])
-            highs = data.get("high", [])
-            lows = data.get("low", [])
-            closes = data.get("close", [])
-            volumes = data.get("vol", data.get("volume", []))
-
-            rows = []
-            for i in range(min(len(times), len(opens), len(highs), len(lows), len(closes))):
-                rows.append({
-                    "timestamp": int(times[i]) * 1000,
-                    "open": float(opens[i]),
-                    "high": float(highs[i]),
-                    "low": float(lows[i]),
-                    "close": float(closes[i]),
-                    "volume": float(volumes[i]) if i < len(volumes) else 0.0,
-                })
-            df = pd.DataFrame(rows)
-        else:
-            raise RuntimeError(f"Unexpected MEXC kline response format for {contract_symbol}: {payload}")
-
-        if df.empty:
-            raise RuntimeError(f"No candles returned for {contract_symbol}")
-
-        df = df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
-        current_1h_start_ms = (int(time.time()) // 3600) * 3600 * 1000
-        df = df[df["timestamp"] < current_1h_start_ms].copy()
-
-        return df.tail(limit).reset_index(drop=True)
-
-    def _aggregate_2h_from_1h(self, df_1h: pd.DataFrame, limit: int = 100) -> pd.DataFrame:
-        df = df_1h.copy()
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        df = df.set_index("datetime")
-
-        agg = df.resample("2h", label="left", closed="left").agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }).dropna()
-
-        current_2h_start_ms = (int(time.time()) // 7200) * 7200 * 1000
-        agg["timestamp"] = (agg.index.view("int64") // 1_000_000).astype("int64")
-        agg = agg[agg["timestamp"] < current_2h_start_ms]
-
-        return agg[["timestamp", "open", "high", "low", "close", "volume"]].tail(limit).reset_index(drop=True)
-
-    def fetch_closed_candles(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        timeframe = timeframe.lower().strip()
-
-        if timeframe == "1h":
-            df = self._fetch_futures_1h_candles(symbol, limit=limit + 5)
-            log.info(f"Fetched {len(df)} closed 1h candles for {symbol}")
-            return df.tail(limit).reset_index(drop=True)
-
-        if timeframe == "2h":
-            df_1h = self._fetch_futures_1h_candles(symbol, limit=(limit * 2) + 10)
-            df_2h = self._aggregate_2h_from_1h(df_1h, limit=limit)
-            log.info(f"Built {len(df_2h)} closed 2h candles for {symbol} from 1h data")
-            return df_2h
-
-        raise ValueError("This bot only supports 1h and 2h timeframes.")
-
-    def last_price(self, symbol: str) -> float:
+    def fetch_ohlcv_df(self, symbol: str, timeframe: str, limit: int = 300) -> pd.DataFrame:
+        key = (symbol, timeframe, limit)
         now = time.time()
-        cached = self._price_cache.get(symbol)
-        if cached and now - cached["time"] <= self.price_cache_seconds:
-            return cached["price"]
+        cached = self._ohlcv_cache.get(key)
+        # Cache OHLCV within one loop for rate-limit protection.
+        if cached and now - cached[0] < max(5, settings.price_cache_seconds):
+            return cached[1].copy()
+        self._sleep_req()
+        raw = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        # Remove currently forming candle.
+        if len(df) > 1:
+            df = df.iloc[:-1].copy()
+        self._ohlcv_cache[key] = (now, df)
+        return df.copy()
 
-        ticker = self._with_retry(self.exchange.fetch_ticker, symbol)
-        price = float(ticker["last"])
-        self._price_cache[symbol] = {"price": price, "time": now}
-        return price
+    def fetch_2h_from_1h(self, symbol: str, limit: int = 150) -> pd.DataFrame:
+        df = self.fetch_ohlcv_df(symbol, "1h", limit * 2 + 20)
+        x = df.copy().set_index("datetime")
+        agg = x.resample("2h", label="left", closed="left").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum", "timestamp": "first"
+        }).dropna().reset_index()
+        return agg[["timestamp", "open", "high", "low", "close", "volume", "datetime"]].tail(limit).reset_index(drop=True)
+
+    def fetch_30m_from_15m(self, symbol: str, limit: int = 200) -> pd.DataFrame:
+        df = self.fetch_ohlcv_df(symbol, "15m", limit * 2 + 20)
+        x = df.copy().set_index("datetime")
+        agg = x.resample("30min", label="left", closed="left").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum", "timestamp": "first"
+        }).dropna().reset_index()
+        return agg[["timestamp", "open", "high", "low", "close", "volume", "datetime"]].tail(limit).reset_index(drop=True)
 
     def balance_usdt(self) -> float:
-        bal = self._with_retry(self.exchange.fetch_balance)
-        for key in ("USDT", "usdt"):
-            if key in bal.get("total", {}):
-                return float(bal["total"][key])
-        return float(bal.get("total", {}).get("USDT", 0) or 0)
+        if settings.dry_run or not settings.use_live_orders:
+            return 1000.0
+        self._sleep_req()
+        bal = self.exchange.fetch_balance()
+        total = bal.get("USDT", {})
+        return float(total.get("free", 0) or total.get("total", 0) or bal.get("total", {}).get("USDT", 0) or 0)
 
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         return float(self.exchange.amount_to_precision(symbol, amount))
@@ -216,9 +76,62 @@ class MexcClient:
     def price_to_precision(self, symbol: str, price: float) -> float:
         return float(self.exchange.price_to_precision(symbol, price))
 
+    def contract_size(self, symbol: str) -> float:
+        market = self.exchange.market(symbol)
+        return float(market.get("contractSize") or 1.0)
+
+    def market_price(self, symbol: str) -> float:
+        now = time.time()
+        cached = self._price_cache.get(symbol)
+        if cached and now - cached[0] <= settings.price_cache_seconds:
+            return cached[1]
+        self._sleep_req()
+        ticker = self.exchange.fetch_ticker(symbol)
+        price = float(ticker.get("last") or ticker.get("close"))
+        self._price_cache[symbol] = (now, price)
+        return price
+
+    def open_positions(self):
+        if settings.dry_run or not settings.use_live_orders:
+            return []
+        try:
+            self._sleep_req()
+            positions = self.exchange.fetch_positions()
+        except Exception:
+            return []
+        result = []
+        for p in positions:
+            contracts = float(p.get("contracts") or p.get("info", {}).get("holdVol") or 0)
+            if contracts > 0:
+                result.append(p)
+        return result
+
+    def has_position(self, symbol: str) -> bool:
+        for p in self.open_positions():
+            if p.get("symbol") == symbol:
+                return True
+        return False
+
+    def configure_futures(self, symbol: str, side: str):
+        if settings.dry_run or not settings.use_live_orders:
+            return
+        position_type = 1 if side == "buy" else 2
+        open_type = 1 if settings.margin_mode.lower().startswith("isol") else 2
+        try:
+            self._sleep_req()
+            self.exchange.set_leverage(settings.leverage, symbol, {"openType": open_type, "positionType": position_type})
+        except Exception as e:
+            log.warning("set_leverage failed %s: %s", symbol, e)
+        try:
+            self._sleep_req()
+            self.exchange.set_margin_mode(settings.margin_mode, symbol, {"openType": open_type, "positionType": position_type, "leverage": settings.leverage})
+        except Exception as e:
+            log.warning("set_margin_mode failed %s: %s", symbol, e)
+
     def create_market_order(self, symbol: str, side: str, amount: float, reduce_only: bool = False):
-        params = {"reduceOnly": reduce_only} if reduce_only else {}
-        if settings.dry_run:
-            log.info(f"DRY_RUN order: {side.upper()} {amount} {symbol} reduce_only={reduce_only}")
-            return {"id": "dry_run", "side": side, "amount": amount, "symbol": symbol}
-        return self._with_retry(self.exchange.create_order, symbol, "market", side, amount, None, params)
+        if settings.dry_run or not settings.use_live_orders:
+            log.info("DRY_RUN order: %s %s amount=%s reduce_only=%s", side.upper(), symbol, amount, reduce_only)
+            return {"id": "dry_run", "symbol": symbol, "side": side, "amount": amount, "dry_run": True}
+        params = {"reduceOnly": reduce_only} if reduce_only else {"openType": 1 if settings.margin_mode.lower().startswith("isol") else 2, "leverage": settings.leverage}
+        self._sleep_req()
+        return self.exchange.create_order(symbol, "market", side, amount, None, params)

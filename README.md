@@ -1,74 +1,36 @@
-# MEXC DLS Bot
+# Master ICT + DLS Bot v1
 
-Automated MEXC Futures bot for Khalil's DLS strategy.
+Combined bot with:
+- ICT strategy
+- DLS Type 1
+- DLS Type 2 with lower-timeframe EC + SPM confirmation
+- Weekly bias engine
+- Daily SPM fallback
+- 4H SPM alignment filter
+- 2% account risk sizing by default
+- Win/loss statistics in `logs/stats.json`
+- Trade history in `logs/trades.csv`
 
-## Strategy Rules
-
-Only checks the `1h` and `2h` timeframes.
-
-### BUY DLS
-1. Candle 1 can be any candle.
-2. Candle 2 takes the high of Candle 1.
-3. Candle 2 closes below Candle 1 high.
-4. Candle 3 takes the low of Candle 1.
-5. Candle 3 closes above Candle 2 body.
-6. Bot buys after Candle 3 closes.
-7. Stop loss below Candle 3.
-8. Take profit = 3R.
-9. Move stop loss to break-even at 0.82R.
-
-### SELL DLS
-1. Candle 1 can be any candle.
-2. Candle 2 takes the low of Candle 1.
-3. Candle 2 closes above Candle 1 low.
-4. Candle 3 takes the high of Candle 1.
-5. Candle 3 closes below Candle 2 body.
-6. Bot sells after Candle 3 closes.
-7. Stop loss above Candle 3.
-8. Take profit = 3R.
-9. Move stop loss to break-even at 0.82R.
-
-## Important Safety Note
-
-The bot starts with `DRY_RUN=true`. This means it logs trades but does not place real orders.
-Only change `DRY_RUN=false` after checking logs and testing with a small account/position.
-
-Trading crypto futures is high risk. Use your own judgement.
-
-## Railway Variables
-
-In Railway, open your project, then go to **Variables** and add:
+## Railway variables
 
 ```env
 MEXC_API_KEY=your_key
-MEXC_SECRET_KEY=your_secret
-SYMBOL=BTC/USDT:USDT
-TIMEFRAMES=1h,2h
-RISK_PERCENT=5
-RISK_REWARD=3
-BREAK_EVEN_R=0.82
-LEVERAGE=1
-DRY_RUN=true
-POLL_SECONDS=60
-```
-
-## How to Upload to GitHub
-
-1. Create a GitHub repository called `mexc-dls-bot`.
-2. Upload all files in this folder.
-3. Do not upload a `.env` file.
-4. Connect the GitHub repository to Railway.
-5. Railway should install `requirements.txt` and run `python main.py` from `railway.json`.
-
-## How to Go Live
-
-1. Confirm the bot is running in Railway logs.
-2. Confirm it says `DryRun=True`.
-3. Watch the logs for signals.
-4. When you are ready for live trading, set Railway variable:
-
-```env
+MEXC_SECRET=your_secret
 DRY_RUN=false
+USE_LIVE_ORDERS=true
+RISK_PER_TRADE=0.02
+SIZING_MODE=risk_percent
+LEVERAGE=50
+MARGIN_MODE=isolated
+MAX_OPEN_POSITIONS=2
+MAX_NEW_TRADES_PER_CYCLE=1
+TRADING_SESSIONS=NEWYORK
+LOOP_SECONDS=120
+MAX_SYMBOLS_PER_CYCLE=8
+REQUEST_DELAY_SECONDS=0.5
+SYMBOL_DELAY_SECONDS=1.0
+RATE_LIMIT_BACKOFF_SECONDS=60
 ```
 
-5. Start with very small risk first.
+## Important
+This is live-ready, but test with small balance first. Risk is set to 2% by default as requested.

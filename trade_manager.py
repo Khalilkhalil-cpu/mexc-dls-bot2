@@ -1,82 +1,64 @@
-from dataclasses import dataclass, asdict
-from typing import Literal
-import csv
-import os
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from typing import List
+from models import Signal
+from journal import record_open, record_close
 from logger import log
-from strategy import Signal
-
-Side = Literal["buy", "sell"]
-
 
 @dataclass
-class Trade:
-    trade_id: str
+class OpenTrade:
     symbol: str
-    side: Side
-    timeframe: str
+    strategy: str
+    side: str
     amount: float
     entry: float
-    stop_loss: float
-    take_profit: float
+    stop: float
+    target: float
     break_even_price: float
     risk_per_unit: float
-    candle3_time: int
+    signal_id: str
     break_even_moved: bool = False
-    is_open: bool = True
-
 
 class TradeManager:
     def __init__(self):
-        self.open_trades: list[Trade] = []
-        os.makedirs("logs", exist_ok=True)
-        self.history_path = "logs/trade_history.csv"
-        if not os.path.exists(self.history_path):
-            with open(self.history_path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "closed_at_utc", "trade_id", "symbol", "side", "timeframe", "amount",
-                    "entry", "exit_price", "stop_loss", "take_profit", "reason", "pnl_estimate"
-                ])
+        self.open_trades: List[OpenTrade] = []
 
-    def has_trade_for_signal(self, symbol: str, timeframe: str, candle3_time: int) -> bool:
-        return any(
-            t.symbol == symbol and t.timeframe == timeframe and t.candle3_time == candle3_time
-            for t in self.open_trades
-        )
+    def add(self, signal: Signal, amount: float):
+        risk = signal.risk_per_unit or abs(signal.entry - signal.stop)
+        be = signal.break_even_price or (signal.entry + risk * 0.82 if signal.side == "buy" else signal.entry - risk * 0.82)
+        t = OpenTrade(signal.symbol, signal.strategy, signal.side, amount, signal.entry, signal.stop, signal.target, be, risk, signal.signal_id)
+        self.open_trades.append(t)
+        record_open(signal, amount)
+        return t
 
-    def add_trade(self, symbol: str, signal: Signal, amount: float) -> Trade:
-        trade = Trade(
-            trade_id=f"{symbol}-{signal.timeframe}-{signal.candle3_time}-{signal.side}",
-            symbol=symbol,
-            side=signal.side,
-            timeframe=signal.timeframe,
-            amount=amount,
-            entry=signal.entry,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
-            break_even_price=signal.break_even_price,
-            risk_per_unit=signal.risk_per_unit,
-            candle3_time=signal.candle3_time,
-        )
-        self.open_trades.append(trade)
-        log.info(f"Trade opened: {asdict(trade)}")
-        return trade
+    def has_signal(self, signal_id: str) -> bool:
+        return any(t.signal_id == signal_id for t in self.open_trades)
 
-    def close_trade(self, trade: Trade, exit_price: float, reason: str):
-        if not trade.is_open:
-            return
-        trade.is_open = False
-        if trade.side == "buy":
-            pnl = (exit_price - trade.entry) * trade.amount
-        else:
-            pnl = (trade.entry - exit_price) * trade.amount
-        with open(self.history_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datetime.now(timezone.utc).isoformat(), trade.trade_id, trade.symbol, trade.side,
-                trade.timeframe, trade.amount, trade.entry, exit_price, trade.stop_loss,
-                trade.take_profit, reason, pnl
-            ])
-        log.info(f"Trade closed: {trade.trade_id} reason={reason} exit={exit_price} pnl_estimate={pnl}")
-        self.open_trades = [t for t in self.open_trades if t.is_open]
+    def manage(self, client):
+        for t in list(self.open_trades):
+            try:
+                price = client.market_price(t.symbol)
+                if not t.break_even_moved:
+                    if (t.side == "buy" and price >= t.break_even_price) or (t.side == "sell" and price <= t.break_even_price):
+                        t.stop = t.entry
+                        t.break_even_moved = True
+                        log.info("Moved SL to BE: %s", t.signal_id)
+                reason = None
+                exit_price = None
+                if t.side == "buy":
+                    if price <= t.stop:
+                        reason, exit_price = "STOP_LOSS", t.stop
+                    elif price >= t.target:
+                        reason, exit_price = "TAKE_PROFIT", t.target
+                else:
+                    if price >= t.stop:
+                        reason, exit_price = "STOP_LOSS", t.stop
+                    elif price <= t.target:
+                        reason, exit_price = "TAKE_PROFIT", t.target
+                if reason:
+                    close_side = "sell" if t.side == "buy" else "buy"
+                    client.create_market_order(t.symbol, close_side, t.amount, reduce_only=True)
+                    stats, r, result = record_close(t, exit_price, reason)
+                    log.warning("Trade closed %s %s R=%.2f | wins=%s losses=%s", t.symbol, result, r, stats["wins"], stats["losses"])
+                    self.open_trades.remove(t)
+            except Exception as e:
+                log.exception("Error managing trade %s: %s", t.signal_id, e)
