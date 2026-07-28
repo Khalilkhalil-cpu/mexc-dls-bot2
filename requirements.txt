@@ -1,0 +1,6 @@
+ccxt>=4.5.0,<5
+pandas>=2.2.0,<3
+numpy>=1.26.0,<3
+openai>=1.100.0,<3
+
+python-dotenv>=1.0.0,<2

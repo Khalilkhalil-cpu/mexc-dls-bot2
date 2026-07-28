@@ -1,0 +1,58 @@
+from __future__ import annotations
+import os
+from dotenv import load_dotenv
+load_dotenv()
+from dataclasses import dataclass
+
+def _bool(name, default): return os.getenv(name,str(default)).strip().lower() in {"1","true","yes","on"}
+def _float(name, default): return float(os.getenv(name,str(default)).strip())
+def _int(name, default): return int(os.getenv(name,str(default)).strip())
+def _symbols():
+    raw=os.getenv("SYMBOLS","BTC/USDT:USDT,ETH/USDT:USDT,BNB/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,ADA/USDT:USDT,DOGE/USDT:USDT,BCH/USDT:USDT,LINK/USDT:USDT,LTC/USDT:USDT,AVAX/USDT:USDT")
+    return tuple(x.strip() for x in raw.split(',') if x.strip())
+
+@dataclass(frozen=True)
+class Settings:
+    api_key:str=os.getenv("MEXC_API_KEY","").strip()
+    api_secret:str=os.getenv("MEXC_API_SECRET","").strip()
+    openai_api_key:str=os.getenv("OPENAI_API_KEY","").strip()
+    openai_model:str=os.getenv("OPENAI_MODEL","gpt-5-mini").strip()
+    ai_mode:str=os.getenv("AI_MODE","REVIEW").strip().upper()
+    ai_min_confidence:int=_int("AI_MIN_CONFIDENCE",80)
+    live_trading:bool=_bool("LIVE_TRADING",False)
+    position_notional_usdt:float=_float("POSITION_NOTIONAL_USDT",200.0)
+    leverage:int=_int("LEVERAGE",25)
+    margin_mode:str=os.getenv("MARGIN_MODE","isolated").strip().lower()
+    symbols:tuple[str,...]=_symbols()
+    fib_shallow:float=_float("FIB_SHALLOW",0.618)
+    fib_deep:float=_float("FIB_DEEP",0.79)
+    reward_risk:float=_float("REWARD_RISK",2.0)
+    break_even_at_r:float=_float("BREAK_EVEN_AT_R",1.5)
+    stop_buffer_bps:float=_float("STOP_BUFFER_BPS",2.0)
+    ema_separation_bps:float=_float("EMA_SEPARATION_BPS",0.0)
+    h1_pivot_left:int=_int("H1_PIVOT_LEFT",2)
+    h1_pivot_right:int=_int("H1_PIVOT_RIGHT",2)
+    m15_pivot_left:int=_int("M15_PIVOT_LEFT",2)
+    m15_pivot_right:int=_int("M15_PIVOT_RIGHT",2)
+    main_swing_min_atr:float=_float("MAIN_SWING_MIN_ATR",1.75)
+    minimum_candidate_score:int=_int("MINIMUM_CANDIDATE_SCORE",80)
+    minimum_sweep_pct:float=_float("MINIMUM_SWEEP_PCT",0.001)
+    min_stop_pct:float=_float("MIN_STOP_PCT",0.003)
+    preferred_max_stop_pct:float=_float("PREFERRED_MAX_STOP_PCT",0.015)
+    max_stop_pct:float=_float("MAX_STOP_PCT",0.03)
+    max_confirmation_bars_15m:int=_int("MAX_CONFIRMATION_BARS_15M",40)
+    poll_seconds:int=_int("POLL_SECONDS",20)
+    heartbeat_seconds:int=_int("HEARTBEAT_SECONDS",300)
+    history_15m_bars:int=_int("HISTORY_15M_BARS",2200)
+    max_open_positions:int=_int("MAX_OPEN_POSITIONS",11)
+    state_file:str=os.getenv("STATE_FILE","/data/state.json").strip()
+    log_level:str=os.getenv("LOG_LEVEL","INFO").strip().upper()
+    def validate(self):
+        if self.live_trading and (not self.api_key or not self.api_secret): raise ValueError("LIVE_TRADING=true requires MEXC_API_KEY and MEXC_API_SECRET")
+        if self.ai_mode not in {"REVIEW","OFF"}: raise ValueError("AI_MODE must be REVIEW or OFF")
+        if self.ai_mode=="REVIEW" and not self.openai_api_key: raise ValueError("AI_MODE=REVIEW requires OPENAI_API_KEY")
+        if not (0<self.fib_shallow<self.fib_deep<1): raise ValueError("Invalid Fibonacci range")
+        if not (0<=self.minimum_candidate_score<=100): raise ValueError("MINIMUM_CANDIDATE_SCORE must be 0-100")
+        if not (0<=self.ai_min_confidence<=100): raise ValueError("AI_MIN_CONFIDENCE must be 0-100")
+        if not (0<self.min_stop_pct<self.max_stop_pct): raise ValueError("Invalid stop percentage settings")
+settings=Settings()
