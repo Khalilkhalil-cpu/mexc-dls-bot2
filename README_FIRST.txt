@@ -1,6 +1,6 @@
-MEXC AI EXTERNAL SWING ENGINE LIVE BOT v2.02
+MEXC AI EXTERNAL SWING ENGINE LIVE BOT v2.03
 
-IMPORTANT v2.02 CHANGE
+IMPORTANT v2.03 CHANGE
 - Leverage is NOT configured for all symbols at startup.
 - This prevents MEXC code 510: Requests are too frequent.
 - After a setup passes the strategy and AI review, the bot configures the approved symbol only.
@@ -50,3 +50,13 @@ v2.01 MEXC LEVERAGE FIX
 - Passes the same MEXC position parameters on entries and closes.
 - LIVE mode fails closed if leverage cannot be confirmed.
 - LEVERAGE and POSITION_NOTIONAL_USDT remain editable environment variables.
+
+
+V2.03 MARKET-DATA RATE-LIMIT FIX
+- Spaces 15m candle requests between symbols.
+- Retries MEXC code 510 with exponential backoff.
+- A temporary public-data rate limit no longer floods the log or crashes startup.
+Recommended Railway variables:
+MARKET_DATA_RETRY_ATTEMPTS=5
+MARKET_DATA_RETRY_DELAY_SECONDS=2.0
+SYMBOL_REQUEST_DELAY_SECONDS=1.0

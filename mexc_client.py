@@ -139,7 +139,29 @@ class MexcClient:
         self._configured_symbols.add(symbol)
 
     def fetch_closed_15m(self, symbol: str, limit: int) -> pd.DataFrame:
-        rows = self.exchange.fetch_ohlcv(symbol, timeframe="15m", limit=limit)
+        max_attempts = max(1, int(self.cfg.market_data_retry_attempts))
+        base_delay = max(0.5, float(self.cfg.market_data_retry_delay_seconds))
+        rows = None
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                rows = self.exchange.fetch_ohlcv(symbol, timeframe="15m", limit=limit)
+                break
+            except Exception as exc:
+                last_error = exc
+                if self._is_rate_limit_error(exc) and attempt < max_attempts:
+                    delay = base_delay * (2 ** (attempt - 1))
+                    log.warning(
+                        "MARKET DATA RATE LIMITED | %s | attempt=%s/%s | retry_in=%.1fs",
+                        symbol, attempt, max_attempts, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+
+        if rows is None:
+            raise RuntimeError(f"Unable to fetch 15m candles for {symbol}: {last_error}")
         if not rows:
             raise RuntimeError(f"No 15m candles returned for {symbol}")
         df = pd.DataFrame(

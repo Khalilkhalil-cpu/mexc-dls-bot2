@@ -161,7 +161,7 @@ def run() -> None:
     settings.validate()
 
     log.info("=" * 72)
-    log.info("MEXC AI EXTERNAL SWING ENGINE LIVE BOT v2.02")
+    log.info("MEXC AI EXTERNAL SWING ENGINE LIVE BOT v2.03")
     log.info("EXTERNAL 1H SWINGS + RANKED 15M LIQUIDITY + AI FAIL-CLOSED REVIEW")
     log.info("=" * 72)
     log.info(
@@ -188,6 +188,11 @@ def run() -> None:
     client.validate_symbols()
 
     log.info("LEVERAGE MODE | configure on approved entry only | leverage=%sx | fail_closed=true", settings.leverage)
+    log.info(
+        "MARKET DATA MODE | retries=%s | base_retry_delay=%.1fs | symbol_spacing=%.1fs",
+        settings.market_data_retry_attempts, settings.market_data_retry_delay_seconds,
+        settings.symbol_request_delay_seconds,
+    )
 
     equity, available = client.account_summary()
     positions = position_map(client)
@@ -247,6 +252,10 @@ def run() -> None:
                     positions = position_map(client)
                 except Exception:
                     log.exception("SYMBOL ERROR | %s", symbol)
+                finally:
+                    # MEXC contract kline endpoint is sensitive to bursts.
+                    # Pace every symbol request, including failed attempts.
+                    time.sleep(max(0.2, settings.symbol_request_delay_seconds))
 
             if time.time() - last_heartbeat >= settings.heartbeat_seconds:
                 equity, available = client.account_summary()
