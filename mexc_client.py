@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import ccxt
@@ -25,6 +26,7 @@ class MexcClient:
             },
         })
         self.markets = self.exchange.load_markets()
+        self._configured_symbols: set[str] = set()
 
     def validate_symbols(self) -> None:
         missing = []
@@ -55,38 +57,86 @@ class MexcClient:
             "no need to change",
         ))
 
-    def configure_symbol(self, symbol: str) -> None:
-        # MEXC keeps leverage separately for long and short positions. Configure both.
-        errors = []
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            'code":510' in text
+            or "code': 510" in text
+            or 'requests are too frequent' in text
+            or 'rate limit' in text
+            or 'too many requests' in text
+        )
+
+    def configure_symbol(self, symbol: str, force: bool = False) -> None:
+        """Configure isolated leverage for one symbol, only when needed.
+
+        MEXC keeps long and short leverage separately. This method is called
+        immediately before a live entry instead of configuring all symbols at
+        startup, which avoids MEXC code 510 request bursts.
+        """
+        if symbol in self._configured_symbols and not force:
+            return
+
+        max_attempts = max(1, int(self.cfg.leverage_retry_attempts))
+        base_delay = max(0.5, float(self.cfg.leverage_retry_delay_seconds))
+        errors: list[str] = []
+
         for side in ("buy", "sell"):
             params = self._position_params(side)
-            try:
-                self.exchange.set_leverage(
-                    int(self.cfg.leverage),
-                    symbol,
-                    {
-                        "openType": params["openType"],
-                        "positionType": params["positionType"],
-                    },
-                )
-                log.info(
-                    "LEVERAGE CONFIGURED | %s | side=%s | leverage=%sx | margin=%s",
-                    symbol, side.upper(), self.cfg.leverage, self.cfg.margin_mode,
-                )
-            except Exception as exc:
-                if self._benign_setup_error(exc):
+            side_ok = False
+            last_error: Exception | None = None
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    self.exchange.set_leverage(
+                        int(self.cfg.leverage),
+                        symbol,
+                        {
+                            "openType": params["openType"],
+                            "positionType": params["positionType"],
+                        },
+                    )
                     log.info(
-                        "LEVERAGE ALREADY SET | %s | side=%s | leverage=%sx | margin=%s",
+                        "LEVERAGE CONFIGURED | %s | side=%s | leverage=%sx | margin=%s",
                         symbol, side.upper(), self.cfg.leverage, self.cfg.margin_mode,
                     )
-                else:
-                    errors.append(f"{side}: {exc}")
+                    side_ok = True
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if self._benign_setup_error(exc):
+                        log.info(
+                            "LEVERAGE ALREADY SET | %s | side=%s | leverage=%sx | margin=%s",
+                            symbol, side.upper(), self.cfg.leverage, self.cfg.margin_mode,
+                        )
+                        side_ok = True
+                        break
+
+                    if self._is_rate_limit_error(exc) and attempt < max_attempts:
+                        delay = base_delay * (2 ** (attempt - 1))
+                        log.warning(
+                            "LEVERAGE RATE LIMITED | %s | side=%s | attempt=%s/%s | retry_in=%.1fs",
+                            symbol, side.upper(), attempt, max_attempts, delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    break
+
+            if not side_ok:
+                errors.append(f"{side}: {last_error}")
+            else:
+                # Space the long and short requests even when the first succeeds.
+                time.sleep(base_delay)
 
         if errors:
             message = f"Unable to confirm leverage for {symbol}: " + " | ".join(errors)
             if self.cfg.live_trading:
                 raise RuntimeError(message)
             log.warning(message)
+            return
+
+        self._configured_symbols.add(symbol)
 
     def fetch_closed_15m(self, symbol: str, limit: int) -> pd.DataFrame:
         rows = self.exchange.fetch_ohlcv(symbol, timeframe="15m", limit=limit)
@@ -128,6 +178,9 @@ class MexcClient:
         return amount
 
     def create_entry(self, symbol: str, side: str, amount: float) -> dict:
+        # Fail closed: never send a live order until leverage is confirmed for this symbol.
+        if self.cfg.live_trading:
+            self.configure_symbol(symbol)
         order_side = "buy" if side == "buy" else "sell"
         params = self._position_params(side)
         return self.exchange.create_order(symbol, "market", order_side, amount, None, params)

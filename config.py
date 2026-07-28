@@ -22,6 +22,8 @@ class Settings:
     live_trading:bool=_bool("LIVE_TRADING",False)
     position_notional_usdt:float=_float("POSITION_NOTIONAL_USDT",200.0)
     leverage:int=_int("LEVERAGE",25)
+    leverage_retry_attempts:int=_int("LEVERAGE_RETRY_ATTEMPTS",5)
+    leverage_retry_delay_seconds:float=_float("LEVERAGE_RETRY_DELAY_SECONDS",2.0)
     margin_mode:str=os.getenv("MARGIN_MODE","isolated").strip().lower()
     symbols:tuple[str,...]=_symbols()
     fib_shallow:float=_float("FIB_SHALLOW",0.618)

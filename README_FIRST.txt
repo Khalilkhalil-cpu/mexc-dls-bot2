@@ -1,3 +1,24 @@
+MEXC AI EXTERNAL SWING ENGINE LIVE BOT v2.02
+
+IMPORTANT v2.02 CHANGE
+- Leverage is NOT configured for all symbols at startup.
+- This prevents MEXC code 510: Requests are too frequent.
+- After a setup passes the strategy and AI review, the bot configures the approved symbol only.
+- It configures both BUY and SELL isolated leverage before sending the entry.
+- Rate-limit errors are retried with exponential backoff.
+- If leverage cannot be confirmed, the entry is cancelled and NO live order is sent.
+
+Railway variables:
+LIVE_TRADING=true
+POSITION_NOTIONAL_USDT=200
+LEVERAGE=40
+MARGIN_MODE=isolated
+LEVERAGE_RETRY_ATTEMPTS=5
+LEVERAGE_RETRY_DELAY_SECONDS=2.0
+STATE_FILE=/data/state.json
+
+Keep the Railway persistent volume mounted at /data because stop-loss, take-profit and break-even management use the state file.
+
 MEXC AI EXTERNAL SWING ENGINE LIVE BOT v2.00
 
 WHAT CHANGED
