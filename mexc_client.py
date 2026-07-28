@@ -35,23 +35,58 @@ class MexcClient:
         if missing:
             raise ValueError(f"Unavailable USDT perpetual symbols: {', '.join(missing)}")
 
+    def _position_params(self, side: str) -> dict:
+        # MEXC contract API: openType 1=isolated, 2=cross; positionType 1=long, 2=short.
+        open_type = 1 if self.cfg.margin_mode == "isolated" else 2
+        position_type = 1 if side == "buy" else 2
+        return {
+            "openType": open_type,
+            "positionType": position_type,
+            "leverage": int(self.cfg.leverage),
+        }
+
+    @staticmethod
+    def _benign_setup_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(x in text for x in (
+            "not modified",
+            "same leverage",
+            "already",
+            "no need to change",
+        ))
+
     def configure_symbol(self, symbol: str) -> None:
-        try:
-            self.exchange.set_margin_mode(self.cfg.margin_mode, symbol)
-        except Exception as exc:
-            text = str(exc).lower()
-            if not any(x in text for x in ("not modified", "same", "already")):
-                log.warning("Margin mode setup warning | %s | %s", symbol, exc)
-        try:
-            self.exchange.set_leverage(
-                self.cfg.leverage,
-                symbol,
-                {"marginMode": self.cfg.margin_mode},
-            )
-        except Exception as exc:
-            text = str(exc).lower()
-            if not any(x in text for x in ("not modified", "same", "already")):
-                log.warning("Leverage setup warning | %s | %s", symbol, exc)
+        # MEXC keeps leverage separately for long and short positions. Configure both.
+        errors = []
+        for side in ("buy", "sell"):
+            params = self._position_params(side)
+            try:
+                self.exchange.set_leverage(
+                    int(self.cfg.leverage),
+                    symbol,
+                    {
+                        "openType": params["openType"],
+                        "positionType": params["positionType"],
+                    },
+                )
+                log.info(
+                    "LEVERAGE CONFIGURED | %s | side=%s | leverage=%sx | margin=%s",
+                    symbol, side.upper(), self.cfg.leverage, self.cfg.margin_mode,
+                )
+            except Exception as exc:
+                if self._benign_setup_error(exc):
+                    log.info(
+                        "LEVERAGE ALREADY SET | %s | side=%s | leverage=%sx | margin=%s",
+                        symbol, side.upper(), self.cfg.leverage, self.cfg.margin_mode,
+                    )
+                else:
+                    errors.append(f"{side}: {exc}")
+
+        if errors:
+            message = f"Unable to confirm leverage for {symbol}: " + " | ".join(errors)
+            if self.cfg.live_trading:
+                raise RuntimeError(message)
+            log.warning(message)
 
     def fetch_closed_15m(self, symbol: str, limit: int) -> pd.DataFrame:
         rows = self.exchange.fetch_ohlcv(symbol, timeframe="15m", limit=limit)
@@ -94,19 +129,13 @@ class MexcClient:
 
     def create_entry(self, symbol: str, side: str, amount: float) -> dict:
         order_side = "buy" if side == "buy" else "sell"
-        params = {
-            "marginMode": self.cfg.margin_mode,
-            "leverage": self.cfg.leverage,
-        }
+        params = self._position_params(side)
         return self.exchange.create_order(symbol, "market", order_side, amount, None, params)
 
     def close_position(self, symbol: str, side: str, amount: float) -> dict:
         close_side = "sell" if side == "buy" else "buy"
-        params = {
-            "reduceOnly": True,
-            "marginMode": self.cfg.margin_mode,
-            "leverage": self.cfg.leverage,
-        }
+        params = self._position_params(side)
+        params["reduceOnly"] = True
         return self.exchange.create_order(symbol, "market", close_side, amount, None, params)
 
     def fetch_positions(self) -> list[dict]:

@@ -161,7 +161,7 @@ def run() -> None:
     settings.validate()
 
     log.info("=" * 72)
-    log.info("MEXC AI EXTERNAL SWING ENGINE LIVE BOT v2.00")
+    log.info("MEXC AI EXTERNAL SWING ENGINE LIVE BOT v2.01")
     log.info("EXTERNAL 1H SWINGS + RANKED 15M LIQUIDITY + AI FAIL-CLOSED REVIEW")
     log.info("=" * 72)
     log.info(

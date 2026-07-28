@@ -22,3 +22,10 @@ START
 IMPORTANT
 Stops and take profit remain software-managed by this bot. The process must stay online.
 AI review does not guarantee profit. Verify this version with backtesting and dry-run logs before real funds.
+
+
+v2.01 MEXC LEVERAGE FIX
+- Configures leverage separately for LONG and SHORT with openType/positionType.
+- Passes the same MEXC position parameters on entries and closes.
+- LIVE mode fails closed if leverage cannot be confirmed.
+- LEVERAGE and POSITION_NOTIONAL_USDT remain editable environment variables.
